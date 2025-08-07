@@ -24,6 +24,8 @@ Press "S" to stop evaluation and gain control back.
 import os
 import pathlib
 import time
+import logging
+import json
 from multiprocessing.managers import SharedMemoryManager
 
 import av
@@ -36,7 +38,6 @@ import numpy as np
 import scipy.spatial.transform as st
 import torch
 from omegaconf import OmegaConf
-import json
 from diffusion_policy.common.replay_buffer import ReplayBuffer
 from diffusion_policy.common.cv2_util import (
     get_image_transform
@@ -60,6 +61,148 @@ from umi.real_world.spacemouse_shared_memory import Spacemouse
 from umi.common.pose_util import pose_to_mat, mat_to_pose
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+# 로깅 설정
+def setup_logging(output_dir):
+    """로깅 설정을 초기화합니다."""
+    log_dir = pathlib.Path(output_dir) / "logs"
+    log_dir.mkdir(exist_ok=True)
+    
+    # 파일 핸들러 설정
+    log_file = log_dir / f"robot_communication_{time.strftime('%Y%m%d_%H%M%S')}.log"
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    
+    # 콘솔 핸들러 설정
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    
+    # 포맷터 설정
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(formatter)
+    
+    # 로거 설정
+    logger = logging.getLogger('robot_communication')
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+def log_observation_data(logger, obs, step_idx):
+    """관찰 데이터를 로깅합니다."""
+    logger.info(f"=== RAW OBSERVATION DATA (Step {step_idx}) ===")
+    logger.info(f"Timestamp: {obs.get('timestamp', 'N/A')}")
+    
+    # 카메라 데이터 로깅
+    for key in obs.keys():
+        if 'camera' in key and 'rgb' in key:
+            img_data = obs[key]
+            logger.info(f"{key}: shape={img_data.shape}, dtype={img_data.dtype}, "
+                       f"min={img_data.min():.6f}, max={img_data.max():.6f}, "
+                       f"mean={img_data.mean():.6f}")
+            
+            # 첫 번째 프레임의 일부 픽셀 값 로깅
+            if len(img_data.shape) >= 3:
+                first_frame = img_data[-1] if len(img_data.shape) == 4 else img_data
+                logger.debug(f"{key} first frame sample pixels (top-left 3x3):")
+                logger.debug(f"{first_frame[:3, :3]}")
+    
+    # 로봇 데이터 로깅
+    for key in obs.keys():
+        if 'robot' in key:
+            robot_data = obs[key]
+            logger.info(f"{key}: shape={robot_data.shape}, dtype={robot_data.dtype}")
+            logger.debug(f"{key} values: {robot_data}")
+    
+    logger.info("=== END OBSERVATION DATA ===")
+
+def log_action_execution(logger, action, timestamps, step_idx):
+    """액션 실행 데이터를 로깅합니다."""
+    logger.info(f"=== ACTION EXECUTION DATA (Step {step_idx}) ===")
+    logger.info(f"Action shape: {action.shape}")
+    logger.info(f"Action timestamps: {timestamps}")
+    logger.info(f"Action dtype: {action.dtype}")
+    
+    # 액션 값 상세 로깅
+    for i, (action_step, timestamp) in enumerate(zip(action, timestamps)):
+        logger.info(f"Action step {i}: timestamp={timestamp:.6f}")
+        logger.debug(f"Action step {i} values: {action_step}")
+        
+        # 로봇별 액션 분해
+        n_robots = len(action_step) // 7
+        for robot_idx in range(n_robots):
+            start_idx = robot_idx * 7
+            end_idx = start_idx + 7
+            robot_action = action_step[start_idx:end_idx]
+            pos = robot_action[:3]
+            rot = robot_action[3:6]
+            gripper = robot_action[6]
+            
+            logger.info(f"  Robot {robot_idx}: pos={pos}, rot={rot}, gripper={gripper:.6f}")
+    
+    logger.info("=== END ACTION EXECUTION DATA ===")
+
+def log_robot_communication(logger, robot_states, gripper_states, step_idx):
+    """로봇과의 통신 상태를 로깅합니다."""
+    logger.info(f"=== ROBOT COMMUNICATION STATUS (Step {step_idx}) ===")
+    
+    # 로봇 상태 로깅
+    for i, robot_state in enumerate(robot_states):
+        logger.info(f"Robot {i} state:")
+        logger.info(f"  Target TCP Pose: {robot_state.get('TargetTCPPose', 'N/A')}")
+        logger.info(f"  Actual TCP Pose: {robot_state.get('ActualTCPPose', 'N/A')}")
+        logger.info(f"  Joint positions: {robot_state.get('ActualQ', 'N/A')}")
+        logger.info(f"  TCP speed: {robot_state.get('TCPSpeed', 'N/A')}")
+    
+    # 그리퍼 상태 로깅
+    for i, gripper_state in enumerate(gripper_states):
+        logger.info(f"Gripper {i} state:")
+        logger.info(f"  Position: {gripper_state.get('gripper_position', 'N/A')}")
+        logger.info(f"  Status: {gripper_state.get('gripper_status', 'N/A')}")
+    
+    logger.info("=== END ROBOT COMMUNICATION STATUS ===")
+
+def save_data_to_json(output_dir, obs, action, step_idx, data_type="policy"):
+    """데이터를 JSON 형태로 저장합니다."""
+    import json
+    import numpy as np
+    
+    # NumPy 배열을 리스트로 변환하는 함수
+    def convert_numpy(obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, dict):
+            return {key: convert_numpy(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_numpy(item) for item in obj]
+        return obj
+    
+    # 데이터 준비
+    data = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.%f"),
+        "step_idx": step_idx,
+        "data_type": data_type,
+        "obs": convert_numpy(obs),
+        "action": convert_numpy(action) if action is not None else None
+    }
+    
+    # 파일 저장
+    json_dir = pathlib.Path(output_dir) / "data_logs" / f"{data_type}_data"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    
+    json_file = json_dir / f"{data_type}_data_{step_idx:06d}.json"
+    with open(json_file, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    
+    return str(json_file)
 
 def solve_table_collision(ee_pose, gripper_width, height_threshold):
     finger_thickness = 25.5 / 1000
@@ -133,15 +276,26 @@ def main(input, output, robot_config,
     max_gripper_width = 0.09
     gripper_speed = 0.2
     
+    # 로깅 설정 초기화
+    logger = setup_logging(output)
+    logger.info("=== UMI Robot Communication Logging Started ===")
+    logger.info(f"Output directory: {output}")
+    logger.info(f"Robot config: {robot_config}")
+    logger.info(f"Frequency: {frequency} Hz")
+    
     # load robot config file
     robot_config_data = yaml.safe_load(open(os.path.expanduser(robot_config), 'r'))
+    logger.info(f"Loaded robot config: {robot_config_data}")
     
     # load left-right robot relative transform
     tx_left_right = np.array(robot_config_data['tx_left_right'])
     tx_robot1_robot0 = tx_left_right
+    logger.info(f"Robot transform matrix: {tx_left_right}")
     
     robots_config = robot_config_data['robots']
     grippers_config = robot_config_data['grippers']
+    logger.info(f"Robots config: {robots_config}")
+    logger.info(f"Grippers config: {grippers_config}")
 
     # load checkpoint
     ckpt_path = input
@@ -289,6 +443,7 @@ def main(input, output, robot_config,
 
                     # pump obs
                     obs = env.get_obs()
+                    logger.info(f"Obs received at {time.time()}, timestamp: {obs['timestamp'][-1]}")
 
                     # visualize
                     episode_id = env.replay_buffer.n_episodes
@@ -296,19 +451,28 @@ def main(input, output, robot_config,
                     match_episode_id = episode_id
                     if match_episode is not None:
                         match_episode_id = match_episode
-                    if match_episode_id in episode_first_frame_map:
-                        match_img = episode_first_frame_map[match_episode_id]
-                        ih, iw, _ = match_img.shape
-                        oh, ow, _ = vis_img.shape
-                        tf = get_image_transform(
-                            input_res=(iw, ih), 
-                            output_res=(ow, oh), 
-                            bgr_to_rgb=False)
-                        match_img = tf(match_img).astype(np.float32) / 255
-                        vis_img = (vis_img + match_img) / 2
+                    # if match_episode_id in episode_first_frame_map:
+                    #     match_img = episode_first_frame_map[match_episode_id]
+                    #     ih, iw, _ = match_img.shape
+                    #     oh, ow, _ = vis_img.shape
+                    #     tf = get_image_transform(
+                    #         input_res=(iw, ih), 
+                    #         output_res=(ow, oh), 
+                    #         bgr_to_rgb=False)
+                    #     match_img = tf(match_img).astype(np.float32) / 255
+                    #     vis_img = (vis_img + match_img) / 2
                     obs_left_img = obs['camera0_rgb'][-1]
                     obs_right_img = obs['camera0_rgb'][-1]
                     vis_img = np.concatenate([obs_left_img, obs_right_img, vis_img], axis=1)
+                    print("1.", obs_left_img.shape, obs_right_img.shape, vis_img.shape)
+                    
+                    # Human control loop에서도 관찰 데이터 로깅 (간소화)
+                    logger.debug(f"=== HUMAN CONTROL OBSERVATION (Iter {iter_idx}) ===")
+                    logger.debug(f"Camera shapes: left={obs_left_img.shape}, right={obs_right_img.shape}")
+                    for key in obs.keys():
+                        if 'robot' in key:
+                            logger.debug(f"{key}: {obs[key].shape}")
+                    logger.debug("=== END HUMAN CONTROL OBSERVATION ===")
                     
                     text = f'Episode: {episode_id}'
                     cv2.putText(
@@ -449,6 +613,9 @@ def main(input, output, robot_config,
                             obs[f'robot{robot_id}_eef_rot_axis_angle']
                         ], axis=-1)[-1]
                         episode_start_pose.append(pose)
+                        
+                    print(pose)
+                    return
 
                     # wait for 1/30 sec to get the closest frame actually
                     # reduces overall latency
@@ -465,6 +632,9 @@ def main(input, output, robot_config,
                         obs = env.get_obs()
                         obs_timestamps = obs['timestamp']
                         print(f'Obs latency {time.time() - obs_timestamps[-1]}')
+                        
+                        # 관찰 데이터 로깅
+                        log_observation_data(logger, obs, iter_idx)
 
                         # run inference
                         with torch.no_grad():
@@ -480,6 +650,14 @@ def main(input, output, robot_config,
                             raw_action = result['action_pred'][0].detach().to('cpu').numpy()
                             action = get_real_umi_action(raw_action, obs, action_pose_repr)
                             print('Inference latency:', time.time() - s)
+                            
+                            # 추론 결과 로깅
+                            logger.info(f"=== INFERENCE RESULT (Step {iter_idx}) ===")
+                            logger.info(f"Raw action shape: {raw_action.shape}")
+                            logger.info(f"Processed action shape: {action.shape}")
+                            logger.info(f"Inference time: {time.time() - s:.6f}s")
+                            logger.debug(f"Raw action sample: {raw_action[0][:10]}...")  # 처음 10개 값만
+                            logger.debug(f"Processed action sample: {action[0][:10]}...")
                         
                         # convert policy action to env actions
                         this_target_poses = action
@@ -518,6 +696,9 @@ def main(input, output, robot_config,
                             this_target_poses = this_target_poses[is_new]
                             action_timestamps = action_timestamps[is_new]
 
+                        # 액션 실행 로깅
+                        log_action_execution(logger, this_target_poses, action_timestamps, iter_idx)
+
                         # execute actions
                         env.exec_actions(
                             actions=this_target_poses,
@@ -525,6 +706,15 @@ def main(input, output, robot_config,
                             compensate_latency=True
                         )
                         print(f"Submitted {len(this_target_poses)} steps of actions.")
+                        
+                        # 로봇 통신 상태 로깅
+                        robot_states = env.get_robot_state()
+                        gripper_states = env.get_gripper_state()
+                        log_robot_communication(logger, robot_states, gripper_states, iter_idx)
+                        
+                        # JSON 형태로 데이터 저장
+                        json_file = save_data_to_json(output, obs, this_target_poses, iter_idx, "policy_inference")
+                        logger.info(f"Data saved to JSON: {json_file}")
 
                         # visualize
                         episode_id = env.replay_buffer.n_episodes

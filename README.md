@@ -1,165 +1,182 @@
-# Universal Manipulation Interface
+# UMI-ARX Cup Task Deployment Tutorial
 
-[[Project page]](https://umi-gripper.github.io/)
-[[Paper]](https://umi-gripper.github.io/#paper)
-[[Hardware Guide]](https://docs.google.com/document/d/1TPYwV9sNVPAi0ZlAupDMkXZ4CA1hsZx7YDMSmcEy6EU/edit?usp=sharing)
-[[Data Collection Instruction]](https://swanky-sphere-ad1.notion.site/UMI-Data-Collection-Tutorial-4db1a1f0f2aa4a2e84d9742720428b4c?pvs=4)
-[[SLAM repo]](https://github.com/cheng-chi/ORB_SLAM3)
-[[SLAM docker]](https://hub.docker.com/r/chicheng/orb_slam3)
+## Hardware
 
-<img width="90%" src="assets/umi_teaser.png">
+### "The UMI cup"
 
-[Cheng Chi](http://cheng-chi.github.io/)<sup>1,2</sup>,
-[Zhenjia Xu](https://www.zhenjiaxu.com/)<sup>1,2</sup>,
-[Chuer Pan](https://chuerpan.com/)<sup>1</sup>,
-[Eric Cousineau](https://www.eacousineau.com/)<sup>3</sup>,
-[Benjamin Burchfiel](http://www.benburchfiel.com/)<sup>3</sup>,
-[Siyuan Feng](https://www.cs.cmu.edu/~sfeng/)<sup>3</sup>,
+Before running the cup arrangement policy on other unseen cups, we suggest testing a standard cup (a 3d model that has similar shape to the ones in the collected data). Although this 3d printed cup is also unseen in the training data, it has the closest shape compared to a random cup.
 
-[Russ Tedrake](https://groups.csail.mit.edu/locomotion/russt.html)<sup>3</sup>,
-[Shuran Song](https://www.cs.columbia.edu/~shurans/)<sup>1,2</sup>
+**Onshape Model Link**: [Onshape](https://cad.onshape.com/documents/...)
 
-<sup>1</sup>Stanford University,
-<sup>2</sup>Columbia University,
-<sup>3</sup>Toyota Research Institute
+#### 3D Printing Config
+- **Material**: PLA, 100% infill, tree support
+- **Color**: Sky blue color is recommended; other colors should work as well (white, black, grey are tested)
 
-## 🛠️ Installation
-Only tested on Ubuntu 22.04
+### ARX Robot Arm
+To purchase ARX robot arms, please visit their official website: https://arx-x.com/
 
-Install docker following the [official documentation](https://docs.docker.com/engine/install/ubuntu/) and finish [linux-postinstall](https://docs.docker.com/engine/install/linux-postinstall/).
+## Software
 
-Install system-level dependencies:
-```console
-$ sudo apt install -y libosmesa6-dev libgl1-mesa-glx libglfw3 patchelf
+### Diffusion Policy Setup
+
+Clone the repository:
+```bash
+git clone git@github.com:real-stanford/detached-umi-policy.git
+cd detached-umi-policy
+mkdir data && cd data && mkdir models && mkdir experiments
 ```
 
-We recommend [Miniforge](https://github.com/conda-forge/miniforge?tab=readme-ov-file#miniforge3) instead of the standard anaconda distribution for faster installation: 
-```console
-$ mamba env create -f conda_environment.yaml
+Download checkpoint and put it into `data/models`
+
+Install python environment (recommend using mamba to create environments. Usage is the same as conda):
+```bash
+mamba env create -f conda_environment.yaml
+conda activate umi
 ```
 
-Activate environment
-```console
-$ conda activate umi
-(umi)$ 
+Test whether diffusion policy is successfully installed:
+```bash
+python detached_policy_inference.py -i data/models/cup_wild_vit_l_1img.ckpt
 ```
 
-## Running UMI SLAM pipeline
-Download example data
-```console
-(umi)$ wget --recursive --no-parent --no-host-directories --cut-dirs=2 --relative --reject="index.html*" https://real.stanford.edu/umi/data/example_demo_session/
+After `PolicyInferenceNode` is listening on `0.0.0.0:8766`, the policy inference process is successfully set up. Keep it running in the background when running umi code.
+
+#### Troubleshooting
+If you have trouble importing huggingface:
+```
+ImportError: Error loading 'diffusion_policy.workspace.train_diffusion_unet_image_workspace.TrainDiffusionUnetImageWorkspace':
+ImportError("cannot import name 'cached_download' from 'huggingface_hub' (/data/yihuai/miniforge3/envs/umi/lib/python3.9/site-packages/huggingface_hub/__init__.py)")
 ```
 
-Run SLAM pipeline
-```console
-(umi)$ python run_slam_pipeline.py example_demo_session
-
-...
-Found following cameras:
-camera_serial
-C3441328164125    5
-Name: count, dtype: int64
-Assigned camera_idx: right=0; left=1; non_gripper=2,3...
-             camera_serial  gripper_hw_idx                                     example_vid
-camera_idx                                                                                
-0           C3441328164125               0  demo_C3441328164125_2024.01.10_10.57.34.882133
-99% of raw data are used.
-defaultdict(<function main.<locals>.<lambda> at 0x7f471feb2310>, {})
-n_dropped_demos 0
-````
-For this dataset, 99% of the data are useable (successful SLAM), with 0 demonstrations dropped. If your dataset has a low SLAM success rate, double check if you carefully followed our [data collection instruction](https://swanky-sphere-ad1.notion.site/UMI-Data-Collection-Instruction-4db1a1f0f2aa4a2e84d9742720428b4c). 
-
-Despite our significant effort on robustness improvement, OBR_SLAM3 is still the most fragile part of UMI pipeline. If you are an expert in SLAM, please consider contributing to our fork of [OBR_SLAM3](https://github.com/cheng-chi/ORB_SLAM3) which is specifically optimized for UMI workflow.
-
-Generate dataset for training.
-```console
-(umi)$ python scripts_slam_pipeline/07_generate_replay_buffer.py -o example_demo_session/dataset.zarr.zip example_demo_session
+Please open `$CONDA_PREFIX/lib/python3.9/site-packages/diffusers/utils/dynamic_modules_utils.py` and remove `cached_download` in:
+```python
+from huggingface_hub import HfFolder, cached_download, hf_hub_download, model_info
 ```
 
-## Training Diffusion Policy
-Single-GPU training. Tested to work on RTX3090 24GB.
-```console
-(umi)$ python train.py --config-name=train_diffusion_unet_timm_umi_workspace task.dataset_path=example_demo_session/dataset.zarr.zip
+### ARX5 Robot Arm Setup
+
+Clone the repository:
+```bash
+git clone git@github.com:real-stanford/arx5-sdk.git
+cd arx5-sdk
 ```
 
-Multi-GPU training.
-```console
-(umi)$ accelerate --num_processes <ngpus> train.py --config-name=train_diffusion_unet_timm_umi_workspace task.dataset_path=example_demo_session/dataset.zarr.zip
+Install conda environment for sdk compilation (python 3.10 is tested, while other versions may work as well):
+```bash
+mamba env create -f conda_environments/py310_environment.yaml
+conda activate arx-py310
 ```
 
-Downloading in-the-wild cup arrangement dataset (processed).
-```console
-(umi)$ wget https://real.stanford.edu/umi/data/zarr_datasets/cup_in_the_wild.zarr.zip
+Compile sdk (if failed, remove the build directory completely and create a new one):
+```bash
+mkdir build && cd build
+cmake .. && make -j
 ```
 
-Multi-GPU training.
-```console
-(umi)$ accelerate --num_processes <ngpus> train.py --config-name=train_diffusion_unet_timm_umi_workspace task.dataset_path=cup_in_the_wild.zarr.zip
+Setup robot arm connection and spacemouse service following instructions in README of arx5-sdk repository.
+
+⚠️ **Important**: When turning on the ARX5 arm, make sure the gripper is fully closed.
+
+Test spacemouse cartesian space control. After modifying the ARX robot arm, `YOUR_MODEL` should be either `X5_umi` or `L5_umi`:
+```bash
+cd python
+conda activate arx-py310
+python examples/spacemouse_teleop.py YOUR_MODEL YOUR_CAN_INTERFACE
 ```
 
-## 🦾 Real-world Deployment
-In this section, we will demonstrate our real-world deployment/evaluation system with the cup arrangement policy. While this policy setup only requires a single arm and camera, the our system supports up to 2 arms and unlimited number of cameras.
-
-### ⚙️ Hardware Setup
-1. Build deployment hardware according to our [Hardware Guide](https://docs.google.com/document/d/1TPYwV9sNVPAi0ZlAupDMkXZ4CA1hsZx7YDMSmcEy6EU).
-2. Setup UR5 with teach pendant:
-    * Obtain IP address and update [eval_robots_config.yaml](example/eval_robots_config.yaml)/robots/robot_ip.
-    * In Installation > Payload
-        * Set mass to 1.81 kg
-        * Set center of gravity to (2, -6, 37)mm, CX/CY/CZ.
-    * TCP will be set automatically by the eval script.
-    * On UR5e, switch control mode to remote.
-
-    If you are using Franka, follow this [instruction](franka_instruction.md).
-3. Setup WSG50 gripper with web interface:
-    * Obtain IP address and update [eval_robots_config.yaml](example/eval_robots_config.yaml)/grippers/gripper_ip.
-    * In Settings > Command Interface
-        * Disable "Use text based Interface"
-        * Enable CRC
-    * In Scripting > File Manager
-        * Upload [umi/real_world/cmd_measure.lua](umi/real_world/cmd_measure.lua)
-    * In Settings > System
-        * Enable Startup Script
-        * Select `/user/cmd_measure.lua` you just uploaded.
-4. Setup GoPro:
-    * Install GoPro Labs [firmware](https://gopro.com/en/us/info/gopro-labs).
-    * Set date and time.
-    * Scan the following QR code for clean HDMI output 
-    <br><img width="50%" src="assets/QR-MHDMI1mV0r27Tp60fWe0hS0sLcFg1dV.png">
-5. Setup [3Dconnexion SpaceMouse](https://www.amazon.com/3Dconnexion-SpaceMouse-Wireless-universal-receiver/dp/B079V367MM):
-    * Install libspnav `sudo apt install libspnav-dev spacenavd`
-    * Start spnavd `sudo systemctl start spacenavd`
-
-### 🤗 Reproducing the Cup Arrangement Policy ☕
-Our in-the-wild cup arragement policy is trained with the distribution of ["espresso cup with saucer"](https://www.amazon.com/s?k=espresso+cup+with+saucer) on Amazon across 30 different locations around Stanford. We created a [Amazon shopping list](https://www.amazon.com/hz/wishlist/ls/Q0T8U2N5U3IU?ref_=wl_share) for all cups used for training. We published the processed [Zarr dataset and](https://real.stanford.edu/umi/data/zarr_datasets) pre-trained [checkpoint](https://real.stanford.edu/umi/data/pretrained_models/) (finetuned CLIP ViT-L backbone).
-
-<img width="90%" src="assets/umi_cup.gif">
-
-Download pre-trained checkpoint.
-```console
-(umi)$ wget https://real.stanford.edu/umi/data/pretrained_models/cup_wild_vit_l_1img.ckpt
+Calibrate gripper (after installing the fin-ray gripper fingers):
+```bash
+python examples/calibrate.py YOUR_MODEL YOUR_CAN_INTERFACE
 ```
 
-Grant permission to the HDMI capture card.
-```console
-(umi)$ sudo chmod -R 777 /dev/bus/usb
+Turn on server for arx5 (under arx-py310 environment; cd to arx5-sdk/python):
+```bash
+python communication/zmq_server.py YOUR_MODEL YOUR_CAN_INTERFACE
 ```
 
-Launch eval script.
-```console
-(umi)$ python eval_real.py --robot_config=example/eval_robots_config.yaml -i cup_wild_vit_l.ckpt -o data/eval_cup_wild_example
+This server will keep running in the background by default on `0.0.0.0:8765`. Robot arm will set to home pose then passive if no commands are sent to the server in 60 seconds to avoid overheating.
+
+### UMI Minimal Deployment for ARX Robot Arm
+
+Clone the github repository:
+```bash
+git clone git@github.com:real-stanford/umi-arx.git
 ```
-After the script started, use your spacemouse to control the robot and the gripper (spacemouse buttons). Press `C` to start the policy. Press `S` to stop.
 
-If everything are setup correctly, your robot should be able to rotate the cup and placing it onto the saucer, anywhere 🎉
+Conda environment:
+```bash
+mamba env create -f umi_arx_environment.yaml
+mamba activate umi-arx
+mkdir -p data/experiments
+```
 
-Known issue ⚠️: The policy doesn't work well under direct sunlight, since the dataset was collected during a rainiy week at Stanford.
+Check camera connection: there should be a blue circle with an hdmi icon on the front screen of gopro.
 
-## 🏷️ License
-This repository is released under the MIT license. See [LICENSE](LICENSE) for additional details.
+#### Run deployment code
 
-## 🙏 Acknowledgement
-* Our GoPro SLAM pipeline is adapted from [Steffen Urban](https://github.com/urbste)'s [fork](https://github.com/urbste/ORB_SLAM3) of [OBR_SLAM3](https://github.com/UZ-SLAMLab/ORB_SLAM3).
-* We used [Steffen Urban](https://github.com/urbste)'s [OpenImuCameraCalibrator](https://github.com/urbste/OpenImuCameraCalibrator/) for camera and IMU calibration.
-* The UMI gripper's core mechanism is adpated from [Push/Pull Gripper](https://www.thingiverse.com/thing:2204113) by [John Mulac](https://www.thingiverse.com/3dprintingworld/designs).
-* UMI's soft finger is adapted from [Alex Alspach](http://alexalspach.com/)'s original design at TRI.
+First make sure the policy inference node and arx5 server are already turned on.
+
+After the elgato capture card is connected, run the following line:
+```bash
+sudo chmod -R 777 /dev/bus/usb
+```
+
+Then run:
+```bash
+python scripts/eval_arx5.py -i /home/detached-umi-policy/data/models/cup_wild_vit_l_1img.ckpt -o data/experiments/DATE --no_mirror
+```
+
+**Setup Instructions**:
+1. Use spacemouse to set the gripper to an initial pose. The initial pose should be roughly **15°** over the table.
+2. Press `c` to start policy inference, `s` to stop. 
+3. ⚠️ **Stop the policy immediately after the cup is put on the dish**, otherwise arx arm may easily go into singularity state and is not safe.
+4. When this program is running, it will monitor all your keyboard movements, even if the cursor is not in the terminal. Stop the program if you want to type anything else.
+5. After a few rounds of policy running, press `q` to stop.
+
+## Experiments
+
+After the environment is setup, you only need to activate the three environments and run the programs accordingly.
+
+💡 **Tip**: To save time and energy, highly recommend using zsh with plugin `zsh-autocomplete` and `zsh-autosuggestions`. A simple setup script can be found at [ubuntu-config](https://github.com/yihuai-gao/ubuntu-config).
+
+### Quick Start Commands
+
+#### 1. Check hardware connection
+(Please check arx5-sdk to find out which CAN adapter you are using)
+
+**SLCAN**:
+```bash
+sudo slcand -o -f -s8 /dev/arxcan0 can0 && sudo ifconfig can0 up
+```
+
+**candleLight**:
+```bash
+sudo ip link set up can0 type can bitrate 1000000
+```
+
+#### 2. USB permission:
+```bash
+sudo chmod -R 777 /dev/bus/usb
+```
+
+#### 3. Policy inference node:
+```bash
+cd detached-umi-policy && conda activate umi
+python detached_policy_inference.py -i data/models/cup_wild_vit_l_1img.ckpt
+```
+
+#### 4. ARX5 communication server:
+```bash
+cd arx5-sdk && conda activate arx-py310
+python python/communication/zmq_server.py YOUR_MODEL YOUR_CAN_INTERFACE
+```
+
+#### 5. Policy deployment code:
+```bash
+cd umi-arx && conda activate umi-arx
+pkill -f eval_arx5 # Important! 
+# If there are running python processes in the background, the robot may move crazily
+python scripts/eval_arx5.py -i YOUR_PATH_TO/detached-umi-policy/data/models/cup_wild_vit_l_1img.ckpt -o data/experiments/DATE --no_mirror
+```
+
+⚠️ **Important Note**: Due to the python multiprocessing issue, your subprocesses may not quit properly after pressing Ctrl-C. Please call `pkill -f eval_arx5` before running again to avoid conflicts with the zombie process.

@@ -135,7 +135,7 @@ class UmiEnv:
                 transform.append(tf4k)
             else:
                 res = (1920, 1080)
-                fps = 60
+                fps = 30
                 buf = 1
                 bit_rate = 3000*1000
                 stack_crop = (idx==0) and mirror_crop
