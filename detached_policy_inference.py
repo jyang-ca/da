@@ -1,3 +1,6 @@
+"""
+python detached_policy_inference.py -i data/models/cup_wild_vit_l_1img.ckpt
+"""
 import sys
 import os
 import time
